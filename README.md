@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # [NeurIPS 2024] Diffusion-based Reinforcement Learning via Q-weighted Variational Policy Optimization
 
 Code release for **Diffusion-based Reinforcement Learning via Q-weighted Variational Policy Optimization (NeurIPS 2024)**.
@@ -42,3 +43,6 @@ url={https://arxiv.org/abs/2405.16173}
 ## Acknowledgement
 
 The code of QVPO is based on the implementation of [DIPO](https://github.com/BellmanTimeHut/DIPO).
+=======
+# diffRL
+>>>>>>> origin/main
