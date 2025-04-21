@@ -21,7 +21,7 @@ python main.py --env_name HalfCheetah-v3--weighted --aug
 
 
 ## Acknowledgement
-
 The code  is based on the implementation of [DIPO](https://github.com/BellmanTimeHut/DIPO), [QVPO](https://github.com/wadx2019/qvpo)
+
 =======
 # diffRL
