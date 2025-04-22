@@ -185,6 +185,14 @@ class Diffusion(nn.Module):
             shape = (batch_size, self.action_dim)
             action = self.p_sample_loop(state, shape)
             return action.clamp_(-1., 1.)
+        
+        elif self.mode == 'ddiffpg':
+            # deterministic or noisy as per eval flag
+            self.noise_ratio = 0 if eval else self.max_noise_ratio
+            batch_size = state.shape[0]
+            shape = (batch_size, self.action_dim)
+            action = self.p_sample_loop(state, shape)  # one diffusion chain
+            return action.clamp(-1., 1.)
 
 
 

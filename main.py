@@ -280,7 +280,7 @@ def main(args=None, logger=None, id=None):
             steps += 1
             episode_steps += 1
             episode_reward += reward
-
+            #print(f"steps: {steps}, reward: {reward}")
             agent.append_memory(state, action, reward, next_state, mask)
 
             if steps >= start_steps:
@@ -288,7 +288,7 @@ def main(args=None, logger=None, id=None):
                 #agent.train()
                 agent.train(steps, updates_per_step)
                 agent.entropy_alpha = min(args.entropy_alpha, max(0.002, args.entropy_alpha-steps/num_steps*args.entropy_alpha))
-
+            #print("train and entropy done")
             if steps % eval_interval == 0:
                 tmp_result = evaluate(eval_env, agent, steps)
                 if tmp_result > best_result:

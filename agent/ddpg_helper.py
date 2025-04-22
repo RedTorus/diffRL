@@ -21,7 +21,7 @@ class NStepReplay:
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
         # transpose to five lists...
-        return map(np.stack, zip(*batch))
+        return tuple(map(np.stack, zip(*batch)))
 
 class DiffusionGoalBuffer:
     def __init__(self, capacity, action_dim, behavior_sample):

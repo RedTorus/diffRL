@@ -88,14 +88,15 @@ class DDiffPG(ActorCriticBase):
         return act * self.action_scale + self.action_bias
 
     def train(self, t, iterations):
-        for _ in range(iterations):
+        for jj in range(iterations):
             # 1) Critic update
             batch  = self.memory.sample(self.batch_size)
+            
             loss_c = self._compute_critic_loss(batch)
             self.critic_optimizer.zero_grad()
             loss_c.backward()
             self.critic_optimizer.step()
-
+            print("Iteration; ", jj)
             # 2) Actor update (delayed)
             if self.learn_steps % self.policy_freq == 0:
                 loss_a = self._compute_actor_loss(batch)
@@ -108,6 +109,7 @@ class DDiffPG(ActorCriticBase):
             soft_update(self.actor,         self.actor_target,  self.tau)
 
             self.learn_steps += 1
+        print("training done")
 
     def _compute_critic_loss(self, batch):
         # Unpack batch (NumPy arrays)
@@ -145,7 +147,7 @@ class DDiffPG(ActorCriticBase):
         ano = add_normal_noise(a0, std)
 
         # Diffusion actor loss
-        return self.actor.get_loss(states, ano)
+        return self.actor.loss(ano, states)
 
     def save_model(self, dir, id=None):
         super().save_model(dir, id)
