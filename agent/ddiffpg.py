@@ -87,26 +87,42 @@ class DDiffPG(ActorCriticBase):
         act = raw.cpu().numpy().flatten().clip(-1,1)
         return act * self.action_scale + self.action_bias
 
-    def train(self, t, iterations):
+    def train(self, t, iterations, log_callback=None):
         for jj in range(iterations):
             # 1) Critic update
             batch  = self.memory.sample(self.batch_size)
             
-            loss_c = self._compute_critic_loss(batch)
+            critic_loss = self._compute_critic_loss(batch)
             self.critic_optimizer.zero_grad()
-            loss_c.backward()
+            critic_loss.backward()
             self.critic_optimizer.step()
             #print("Iteration; ", jj)
             # 2) Actor update (delayed)
             if self.learn_steps % self.policy_freq == 0:
-                loss_a = self._compute_actor_loss(batch)
+                actor_loss = self._compute_actor_loss(batch)
                 self.actor_optimizer.zero_grad()
-                loss_a.backward()
+                actor_loss.backward()
                 self.actor_optimizer.step()
 
             # 3) Soft target updates
             soft_update(self.critic,        self.critic_target, self.tau)
             soft_update(self.actor,         self.actor_target,  self.tau)
+
+            if log_callback is not None:
+                # if actor_loss is None, you can either skip it or log nan
+                if actor_loss is None:
+                    metrics = {
+                        'critic_loss': critic_loss.item(),
+                        'actor_loss': float('nan'),
+                        'step': self.step
+                    }
+                else:
+                    metrics = {
+                        'critic_loss': critic_loss.item(),
+                        'actor_loss':  actor_loss.item(),
+                        'step': self.step
+                    }
+                log_callback(metrics, self.step)
 
             self.learn_steps += 1
         #print("training done")
