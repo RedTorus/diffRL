@@ -270,4 +270,64 @@ class Diffusion(nn.Module):
     def forward(self, state, eval=False, q_func=None, normal=False):
         #return self.dipo_sample(state, eval)
         return self.sample(state, eval, q_func, normal)
+    
+    def set_timesteps(self, num_inference_steps, device=None):
+        """
+        Emulates Diffusers Scheduler.set_timesteps:
+        build a reversed list of timesteps to use in inference.
+        """
+        #self.num_inference_steps = num_inference_steps
+        # evenly‐spaced indices from 0...n_timesteps-1, then reverse
+        timesteps = torch.linspace(
+            0,
+            self.n_timesteps - 1,
+            num_inference_steps,
+            device=device or self.betas.device
+        ).long()
+        # reverse order for backward process
+        self.timesteps = timesteps.flip(0)
+
+    def add_noise(self, x0, noise, timesteps):
+        """
+        Emulate Scheduler.add_noise: forward‐diffuse clean x0 to xt.
+        """
+        return self.q_sample(x_start=x0, t=timesteps, noise=noise)
+    
+    def scale_model_input(self, sample, timestep=None):
+        """
+        Emulate Scheduler.scale_model_input: optionally rescale xt
+        before feeding into the denoiser network.
+        """
+        return extract(self.sqrt_recip_alphas_cumprod, timestep, sample.shape) * sample
+    
+    def step(self, model_output, timestep, sample):
+        """
+        Emulate Scheduler.step: reverse‐diffuse xt→x_{t-1} given εθ.
+        """
+        # 1) predict x0
+        x0_pred = self.predict_start_from_noise(sample, t=timestep, noise=model_output)
+        # 2) compute posterior mean & log‐variance
+        mean, _, log_var = self.q_posterior(x_start=x0_pred, x_t=sample, t=timestep)
+        # 3) add noise for backward step
+        noise = torch.randn_like(sample)
+        mask = (timestep > 0).float().view(-1,*([1]*(sample.ndim-1)))
+        return mean + mask * (0.5 * log_var).exp() * noise * self.noise_ratio
+    
+    # inside class Diffusion:
+
+    def __call__(self, state, eval=False, q_func=None, normal=False):
+        """
+        Route all policy calls through forward().
+        We no longer support scheduler(step) dispatch here,
+        since DDiffPG only needs to run the learned policy.
+        """
+        return self.forward(state, eval=eval, q_func=q_func, normal=normal)
+        
+
+
+    
+
+
+
+
 

@@ -6,6 +6,7 @@ import torch
 
 from agent.qvpo import QVPO
 from agent.dipo import DiPo
+from agent.ddiffpg import DDiffPG
 from agent.replay_memory import ReplayMemory, DiffusionMemory
 
 from tensorboardX import SummaryWriter
@@ -15,6 +16,9 @@ from logger import Logger
 import datetime
 import wandb
 from argparse import Namespace
+import yaml
+import pdb
+import ast
 
 def readParser():
     parser = argparse.ArgumentParser(description='Diffusion Policy')
@@ -172,6 +176,31 @@ def init_wandb(args, project_name="qvpo", run_name=None):
     
     return run
 
+def merge_yaml_into_args(args, yaml_path="agent/config.yaml"):
+    """
+    Given an argparse.Namespace `args` (already from parser.parse_args()),
+    load `config.yaml`, and override any fields under `args:`.
+
+    • If a YAML value is a string, we try ast.literal_eval() to convert
+      numerics (e.g. '1e-4') into Python numbers.
+    • If literal_eval fails (e.g. for 'vp'), we keep the original string.
+    """
+    # 1) Load the YAML config as a dict
+    with open(yaml_path, "r") as f:
+        cfg = yaml.safe_load(f)                                  # :contentReference[oaicite:0]{index=0}
+
+    # 2) Merge under the 'args' section
+    for key, val in cfg.get("args", {}).items():
+        if isinstance(val, str):
+            try:
+                # converts '1e-4'→0.0001, '200_000'→200000, '[1,2,3]'→[1,2,3], etc.
+                val = ast.literal_eval(val)                      # :contentReference[oaicite:1]{index=1}
+            except (ValueError, SyntaxError):
+                # leave non‑literal strings like "vp" intact
+                pass
+        setattr(args, key, val)
+
+    return args
 
 def main(args=None, logger=None, id=None):
 
@@ -209,7 +238,8 @@ def main(args=None, logger=None, id=None):
 
     memory = ReplayMemory(state_size, action_size, memory_size, device)
     diffusion_memory = DiffusionMemory(state_size, action_size, memory_size, device)
-
+    merge_yaml_into_args(args)
+    #pdb.set_trace()
     cfg = Namespace(
         memory = memory,
         diffusion_memory = diffusion_memory,
@@ -218,15 +248,16 @@ def main(args=None, logger=None, id=None):
         action_space = env.action_space,
         device = device,
         updates_per_step=updates_per_step,
+        gamma=args.gamma,
         args=args,
     )
 
     #agent = QVPO(args, state_size, env.action_space, memory, diffusion_memory, device) if args.agent == 'qvpo' else \
     #    DiPo(args, state_size, env.action_space, memory, diffusion_memory, device)
-    agent = QVPO(cfg) #QVPO(cfg) #if args.agent == 'qvpo' else DiPo(cfg)
+    #agent = QVPO(cfg) #QVPO(cfg) #if args.agent == 'qvpo' else DiPo(cfg)
     #agent = DiPo(args, state_size, env.action_space, memory, diffusion_memory, device)
     #QVPO(args, state_size, env.action_space, memory, diffusion_memory, device)
-
+    agent = DDiffPG(cfg)
     steps = 0
     episodes = 0
     best_result = -float('inf')
@@ -254,7 +285,8 @@ def main(args=None, logger=None, id=None):
 
             if steps >= start_steps:
                 #agent.train(steps, updates_per_step, batch_size=batch_size, log_writer=writer)
-                agent.train()
+                #agent.train()
+                agent.train(steps, updates_per_step)
                 agent.entropy_alpha = min(args.entropy_alpha, max(0.002, args.entropy_alpha-steps/num_steps*args.entropy_alpha))
 
             if steps % eval_interval == 0:
