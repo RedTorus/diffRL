@@ -18,8 +18,7 @@ class Diffusion(nn.Module):
     def __init__(self, state_dim, action_dim, noise_ratio,
                  beta_schedule='vp', n_timesteps=1000,
                  loss_type='l2', clip_denoised=True, predict_epsilon=True,
-                 behavior_sample=16, eval_sample=512, deterministic=False, mode='qvpo', 
-                 diffusion_mode='ddpm', num_inference_steps=0):
+                 behavior_sample=16, eval_sample=512, deterministic=False, mode='qvpo'):
         super(Diffusion, self).__init__()
 
         self.state_dim = state_dim
@@ -32,20 +31,6 @@ class Diffusion(nn.Module):
         self.behavior_sample = behavior_sample
         self.eval_sample = eval_sample
         self.deterministic = deterministic
-
-        self.diffusion_mode = diffusion_mode
-        self.num_inference_steps = num_inference_steps
-        if num_inference_steps == 0:
-            if diffusion_mode == 'ddpm':
-                self.num_inference_steps = n_timesteps
-            elif diffusion_mode == 'ddim':
-                self.num_inference_steps = 50
-            elif diffusion_mode == 'plms':
-                self.num_inference_steps = 50
-            elif diffusion_mode == 'dpmsolver':
-                self.num_inference_steps = 50
-            else:
-                raise ValueError(f"Unknown diffusion_mode={self.diffusion_mode}")
 
         if beta_schedule == 'linear':
             betas = linear_beta_schedule(n_timesteps)
@@ -87,20 +72,6 @@ class Diffusion(nn.Module):
                              (1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod))
 
         self.loss_fn = Losses[loss_type]()
-
-
-    def set_timesteps(self, device=None):
-        """
-        Build a reversed list of timesteps for inference based on num_inference_steps.
-        """
-        timesteps = torch.linspace(
-            0,
-            self.n_timesteps - 1,
-            self.num_inference_steps,
-            device=device or self.betas.device
-        ).long()
-        self.timesteps = timesteps.flip(0)
-
 
     # ------------------------------------------ sampling ------------------------------------------#
 
@@ -152,110 +123,76 @@ class Diffusion(nn.Module):
 
     @torch.no_grad()
     def p_sample_loop(self, state, shape):
-        """
-        DDPM ancestral sampling over self.timesteps for uniform inference steps.
-        """
         device = self.betas.device
+
         batch_size = shape[0]
         x = torch.randn(shape, device=device)
-        # use uniform timesteps for DDPM as well
-        self.set_timesteps(device=device)
-        for t in self.timesteps:
-            ts = torch.full((batch_size,), t, device=device, dtype=torch.long)
-            x = self.p_sample(x, ts, state)
+
+        for i in reversed(range(0, self.n_timesteps)):
+            timesteps = torch.full((batch_size,), i, device=device, dtype=torch.long)
+            x = self.p_sample(x, timesteps, state)
+
         return x
-
-    # -------------------- New Samplers --------------------
-    @torch.no_grad()
-    def ddim_sample(self, state):
-        """Deterministic DDIM sampling."""
-        device = self.betas.device
-        batch = state.shape[0]
-        x = torch.randn((batch, self.action_dim), device=device)
-        self.set_timesteps(device=device)
-        for idx, t in enumerate(self.timesteps):
-            ts = torch.full((batch,), t, device=device, dtype=torch.long)
-            eps = self.model(x, ts, state)
-            x0 = self.predict_start_from_noise(x, ts, eps)
-            a_t = extract(self.alphas_cumprod, ts, x.shape)
-            next_t = self.timesteps[idx+1] if idx+1 < len(self.timesteps) else 0
-            a_prev = extract(self.alphas_cumprod, torch.full((batch,), next_t, device=device, dtype=torch.long), x.shape)
-            dir_xt = ((a_prev.sqrt() * x0 - a_t.sqrt() * x) / (a_t.sqrt()))
-            x = a_prev.sqrt() * x0 + dir_xt
-        return x.clamp(-1., 1.)
-
-    def plms_sample(self, state):
-        """(Placeholder) PLMS sampling to be implemented."""
-        raise NotImplementedError("PLMS sampler not implemented yet")
-
-    def dpm_solver_sample(self, state):
-        """(Placeholder) DPM-Solver sampling to be implemented."""
-        raise NotImplementedError("DPM-Solver sampler not implemented yet")
-
-    def _call_sampler(self, s, shape):
-        if self.diffusion_mode == 'ddpm':
-            return self.p_sample_loop(s, shape)
-        elif self.diffusion_mode == 'ddim':
-            return self.ddim_sample(s)
-        elif self.diffusion_mode == 'plms':
-            return self.plms_sample(s)
-        elif self.diffusion_mode == 'dpmsolver':
-            return self.dpm_solver_sample(s)
-        else:
-            raise ValueError(f"Unknown diffusion_mode={self.diffusion_mode}")
 
     @torch.no_grad()
     def sample(self, state, eval=False, q_func=None, normal=False):
-        # — noise_ratio logic unchanged —
+
         if self.mode == 'qvpo':
             if self.deterministic:
                 self.noise_ratio = 0 if eval else self.max_noise_ratio
             else:
                 self.noise_ratio = self.max_noise_ratio
 
-            # normal‐mode shortcut
             if normal:
                 batch_size = state.shape[0]
                 shape = (batch_size, self.action_dim)
-                action = self._call_sampler(state, shape)
+                action = self.p_sample_loop(state, shape)
                 action.clamp_(-1., 1.)
                 return action
 
-            # best‐of‐N in eval vs behavior
-            raw_batch_size = state.shape[0]
             if eval:
-                reps = self.eval_sample
+                raw_batch_size = state.shape[0]
+                state = state.repeat(self.eval_sample, 1)
+                batch_size = state.shape[0]
+                shape = (batch_size, self.action_dim)
+                action = self.p_sample_loop(state, shape)
+                action.clamp_(-1., 1.)
+                q1, q2 = q_func(state, action)
+                q = torch.min(q1, q2)
+                action = action.view(self.eval_sample, raw_batch_size, -1).transpose(0,1)
+                q = q.view(self.eval_sample, raw_batch_size, -1).transpose(0,1)
+                action_idx = torch.argmax(q, dim=1, keepdim=True).repeat(1,1,self.action_dim)
+                return action.gather(dim=1, index=action_idx).view(raw_batch_size, -1)
             else:
-                reps = self.behavior_sample
-
-            state_rep = state.repeat(reps, 1)
-            shape = (state_rep.shape[0], self.action_dim)
-            action = self._call_sampler(state_rep, shape)
-            action.clamp_(-1., 1.)
-
-            q1, q2 = q_func(state_rep, action)
-            q = torch.min(q1, q2)
-            action = action.view(reps, raw_batch_size, -1).transpose(0, 1)
-            q      = q.view     (reps, raw_batch_size, -1).transpose(0, 1)
-            idx = torch.argmax(q, dim=1, keepdim=True).repeat(1, 1, self.action_dim)
-            return action.gather(dim=1, index=idx).view(raw_batch_size, -1)
-
+                raw_batch_size = state.shape[0]
+                state = state.repeat(self.behavior_sample, 1)
+                batch_size = state.shape[0]
+                shape = (batch_size, self.action_dim)
+                action = self.p_sample_loop(state, shape)
+                action.clamp_(-1., 1.)
+                q1, q2 = q_func(state, action)
+                q = torch.min(q1, q2)
+                action = action.view(self.behavior_sample, raw_batch_size, -1).transpose(0,1)
+                q = q.view(self.behavior_sample, raw_batch_size, -1).transpose(0,1)
+                action_idx = torch.argmax(q, dim=1, keepdim=True).repeat(1,1,self.action_dim)
+                return action.gather(dim=1, index=action_idx).view(raw_batch_size, -1)
+            
         elif self.mode == 'dipo':
+
             self.noise_ratio = 0 if eval else self.max_noise_ratio
+        
             batch_size = state.shape[0]
             shape = (batch_size, self.action_dim)
-            action = self._call_sampler(state, shape)
-            return action.clamp(-1., 1.)
-
+            action = self.p_sample_loop(state, shape)
+            return action.clamp_(-1., 1.)
+        
         elif self.mode == 'ddiffpg':
+            # deterministic or noisy as per eval flag
             self.noise_ratio = 0 if eval else self.max_noise_ratio
             batch_size = state.shape[0]
             shape = (batch_size, self.action_dim)
-            action = self._call_sampler(state, shape)
+            action = self.p_sample_loop(state, shape)  # one diffusion chain
             return action.clamp(-1., 1.)
-
-        else:
-            raise ValueError(f"Unknown mode={self.mode}")
 
 
 
@@ -342,21 +279,21 @@ class Diffusion(nn.Module):
         #return self.dipo_sample(state, eval)
         return self.sample(state, eval, q_func, normal)
     
-    # def set_timesteps(self, num_inference_steps, device=None):
-    #     """
-    #     Emulates Diffusers Scheduler.set_timesteps:
-    #     build a reversed list of timesteps to use in inference.
-    #     """
-    #     #self.num_inference_steps = num_inference_steps
-    #     # evenly‐spaced indices from 0...n_timesteps-1, then reverse
-    #     timesteps = torch.linspace(
-    #         0,
-    #         self.n_timesteps - 1,
-    #         num_inference_steps,
-    #         device=device or self.betas.device
-    #     ).long()
-    #     # reverse order for backward process
-    #     self.timesteps = timesteps.flip(0)
+    def set_timesteps(self, num_inference_steps, device=None):
+        """
+        Emulates Diffusers Scheduler.set_timesteps:
+        build a reversed list of timesteps to use in inference.
+        """
+        #self.num_inference_steps = num_inference_steps
+        # evenly‐spaced indices from 0...n_timesteps-1, then reverse
+        timesteps = torch.linspace(
+            0,
+            self.n_timesteps - 1,
+            num_inference_steps,
+            device=device or self.betas.device
+        ).long()
+        # reverse order for backward process
+        self.timesteps = timesteps.flip(0)
 
     def add_noise(self, x0, noise, timesteps):
         """

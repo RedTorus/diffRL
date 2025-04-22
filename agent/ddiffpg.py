@@ -98,6 +98,7 @@ class DDiffPG(ActorCriticBase):
             self.critic_optimizer.step()
             #print("Iteration; ", jj)
             # 2) Actor update (delayed)
+            actor_loss = None
             if self.learn_steps % self.policy_freq == 0:
                 actor_loss = self._compute_actor_loss(batch)
                 self.actor_optimizer.zero_grad()

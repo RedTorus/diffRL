@@ -28,8 +28,8 @@ def readParser():
     parser.add_argument('--seed', type=int, default=0, metavar='N',
                         help='random seed (default: 0)')
 
-    parser.add_argument('--num_steps', type=int, default=1000000, metavar='N',
-                        help='env timesteps (default: 1000000)')
+    parser.add_argument('--num_steps', type=int, default=500000, metavar='N',
+                        help='env timesteps (default: 1000000)') #1000 000
 
     parser.add_argument('--batch_size', type=int, default=256, metavar='N',
                         help='batch size (default: 256)')
@@ -106,7 +106,7 @@ def readParser():
     parser.add_argument('--use_wandb', default=True, help="Enable wandb logging")
 
     parser.add_argument('--agent', type=str, default='qvpo', help="qvpo or dipo")
-
+    parser.add_argument('--diffusion_mode' , type=str, default='ddpm', help="ddpm or ddim")
     return parser.parse_args()
 
 
@@ -217,7 +217,7 @@ def main(args=None, logger=None, id=None):
 
     if args.use_wandb:
         print("--------Using wandb for logging")
-        init_wandb(args, run_name=args.agent+args.env_name)
+        init_wandb(args, run_name=args.agent+args.env_name+ args.diffusion_mode)
         wandb.define_metric("critic_loss", step_metric="step")
         wandb.define_metric("actor_loss",  step_metric="step")
         wandb.define_metric("reward",      step_metric="episode")
@@ -302,7 +302,7 @@ def main(args=None, logger=None, id=None):
                 if args.agent!='ddiffpg':
                     agent.train(log_callback=lambda metrics, step: wandb.log(metrics))
                 else:
-                    agent.train(steps, updates_per_step)
+                    agent.train(steps, updates_per_step, log_callback=lambda metrics, step: wandb.log(metrics))
 
                 if args.agent == 'qvpo':
                     agent.entropy_alpha = min(args.entropy_alpha, max(0.002, args.entropy_alpha-steps/num_steps*args.entropy_alpha))
