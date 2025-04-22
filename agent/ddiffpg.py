@@ -96,7 +96,7 @@ class DDiffPG(ActorCriticBase):
             self.critic_optimizer.zero_grad()
             loss_c.backward()
             self.critic_optimizer.step()
-            print("Iteration; ", jj)
+            #print("Iteration; ", jj)
             # 2) Actor update (delayed)
             if self.learn_steps % self.policy_freq == 0:
                 loss_a = self._compute_actor_loss(batch)
@@ -109,7 +109,7 @@ class DDiffPG(ActorCriticBase):
             soft_update(self.actor,         self.actor_target,  self.tau)
 
             self.learn_steps += 1
-        print("training done")
+        #print("training done")
 
     def _compute_critic_loss(self, batch):
         # Unpack batch (NumPy arrays)
