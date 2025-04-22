@@ -144,9 +144,19 @@ class ActorCriticBase:
 
             # 4) logging, step count, etc.
             if log_callback is not None:
-                metrics = {'critic_loss': critic_loss.item()}
-                if actor_loss is not None:
-                    metrics['actor_loss'] = actor_loss.item()
+                # if actor_loss is None, you can either skip it or log nan
+                if actor_loss is None:
+                    metrics = {
+                        'critic_loss': critic_loss.item(),
+                        'actor_loss': float('nan'),
+                        'step': self.step
+                    }
+                else:
+                    metrics = {
+                        'critic_loss': critic_loss.item(),
+                        'actor_loss':  actor_loss.item(),
+                        'step': self.step
+                    }
                 log_callback(metrics, self.step)
 
             self.step += 1

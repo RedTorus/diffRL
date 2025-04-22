@@ -19,6 +19,7 @@ from argparse import Namespace
 import yaml
 import pdb
 import ast
+import d4rl
 
 def readParser():
     parser = argparse.ArgumentParser(description='Diffusion Policy')
@@ -150,7 +151,7 @@ def generate_run_name(prefix='run'):
     run_name = f"{prefix}_{now.strftime('%d%m_%H%M')}"
     return run_name
 
-def init_wandb(args, project_name="qvpo", run_name=None):
+def init_wandb(args, project_name="DiffRL", run_name=None):
     """
     Initializes Weights & Biases for experiment tracking.
 
@@ -173,6 +174,8 @@ def init_wandb(args, project_name="qvpo", run_name=None):
         config=config,
         reinit=True  # Allows running multiple runs in the same process if needed.
     )
+
+    
     
     return run
 
@@ -214,7 +217,11 @@ def main(args=None, logger=None, id=None):
 
     if args.use_wandb:
         print("--------Using wandb for logging")
-        init_wandb(args)
+        init_wandb(args, run_name=args.agent+args.env_name)
+        wandb.define_metric("critic_loss", step_metric="step")
+        wandb.define_metric("actor_loss",  step_metric="step")
+        wandb.define_metric("reward",      step_metric="episode")
+        wandb.define_metric("steps",       step_metric="episode")
     # Initial environment
     env = gym.make(args.env_name)
     eval_env = copy.deepcopy((env))
@@ -257,7 +264,13 @@ def main(args=None, logger=None, id=None):
     #agent = QVPO(cfg) #QVPO(cfg) #if args.agent == 'qvpo' else DiPo(cfg)
     #agent = DiPo(args, state_size, env.action_space, memory, diffusion_memory, device)
     #QVPO(args, state_size, env.action_space, memory, diffusion_memory, device)
-    agent = DDiffPG(cfg)
+    if args.agent == 'qvpo':
+        agent = QVPO(cfg)
+    elif args.agent == 'dipo':
+        agent = DiPo(cfg)
+    elif args.agent == 'ddiffpg':
+        agent = DDiffPG(cfg) 
+    #DDiffPG(cfg)
     steps = 0
     episodes = 0
     best_result = -float('inf')
@@ -286,8 +299,13 @@ def main(args=None, logger=None, id=None):
             if steps >= start_steps:
                 #agent.train(steps, updates_per_step, batch_size=batch_size, log_writer=writer)
                 #agent.train()
-                agent.train(steps, updates_per_step)
-                agent.entropy_alpha = min(args.entropy_alpha, max(0.002, args.entropy_alpha-steps/num_steps*args.entropy_alpha))
+                if args.agent!='ddiffpg':
+                    agent.train(log_callback=lambda metrics, step: wandb.log(metrics))
+                else:
+                    agent.train(steps, updates_per_step)
+
+                if args.agent == 'qvpo':
+                    agent.entropy_alpha = min(args.entropy_alpha, max(0.002, args.entropy_alpha-steps/num_steps*args.entropy_alpha))
             #print("train and entropy done")
             if steps % eval_interval == 0:
                 tmp_result = evaluate(eval_env, agent, steps)
@@ -302,9 +320,10 @@ def main(args=None, logger=None, id=None):
         #     writer.add_scalar('reward/train', episode_reward, steps)
         if args.use_wandb:
             wandb.log({
-            "reward": episode_reward,
-            "steps": episode_steps
-        }, step=episodes)
+                "reward": episode_reward,
+                "steps": episode_steps,
+                "episode": episodes,
+            })
 
         print(f'episode: {episodes:<4}  '
               f'episode steps: {episode_steps:<4}  '
