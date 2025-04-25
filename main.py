@@ -28,7 +28,7 @@ def readParser():
     parser.add_argument('--seed', type=int, default=0, metavar='N',
                         help='random seed (default: 0)')
 
-    parser.add_argument('--num_steps', type=int, default=500000, metavar='N',
+    parser.add_argument('--num_steps', type=int, default=1000000, metavar='N',
                         help='env timesteps (default: 1000000)') #1000 000
 
     parser.add_argument('--batch_size', type=int, default=256, metavar='N',
@@ -224,6 +224,7 @@ def main(args=None, logger=None, id=None):
         wandb.define_metric("steps",       step_metric="episode")
     # Initial environment
     env = gym.make(args.env_name)
+    env = gym.wrappers.TimeLimit(env.env, max_episode_steps=500)
     eval_env = copy.deepcopy((env))
     state_size = int(np.prod(env.observation_space.shape))
     action_size = int(np.prod(env.action_space.shape))
