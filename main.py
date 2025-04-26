@@ -224,7 +224,7 @@ def main(args=None, logger=None, id=None):
         wandb.define_metric("steps",       step_metric="episode")
     # Initial environment
     env = gym.make(args.env_name)
-    env = gym.wrappers.TimeLimit(env.env, max_episode_steps=500)
+    env = gym.wrappers.TimeLimit(env.env, max_episode_steps=300)
     eval_env = copy.deepcopy((env))
     state_size = int(np.prod(env.observation_space.shape))
     action_size = int(np.prod(env.action_space.shape))
