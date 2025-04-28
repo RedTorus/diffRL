@@ -107,6 +107,7 @@ def readParser():
 
     parser.add_argument('--agent', type=str, default='qvpo', help="qvpo or dipo")
     parser.add_argument('--diffusion_mode' , type=str, default='ddpm', help="ddpm or ddim")
+    parser.add_argument('--start_steps', type=int, default=10000)
     return parser.parse_args()
 
 
@@ -238,7 +239,7 @@ def main(args=None, logger=None, id=None):
 
     memory_size = 1e6
     num_steps = args.num_steps
-    start_steps = 10000
+    start_steps = args.start_steps
     eval_interval = 10000
     updates_per_step = 1
     batch_size = args.batch_size
