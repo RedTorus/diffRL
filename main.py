@@ -108,6 +108,8 @@ def readParser():
     parser.add_argument('--agent', type=str, default='qvpo', help="qvpo or dipo")
     parser.add_argument('--diffusion_mode' , type=str, default='ddpm', help="ddpm or ddim")
     parser.add_argument('--start_steps', type=int, default=10000)
+    parser.add_argument('--pretraining_steps', type=int, default=0)
+
     return parser.parse_args()
 
 
@@ -226,6 +228,8 @@ def main(args=None, logger=None, id=None):
     # Initial environment
     env = gym.make(args.env_name)
     env = gym.wrappers.TimeLimit(env.env, max_episode_steps=300)
+    dataset = d4rl.qlearning_dataset(env) #env.get_dataset()
+
     eval_env = copy.deepcopy((env))
     state_size = int(np.prod(env.observation_space.shape))
     action_size = int(np.prod(env.action_space.shape))
@@ -244,6 +248,7 @@ def main(args=None, logger=None, id=None):
     updates_per_step = 1
     batch_size = args.batch_size
     log_interval = 10
+    pretraining_steps = args.pretraining_steps
 
     memory = ReplayMemory(state_size, action_size, memory_size, device)
     diffusion_memory = DiffusionMemory(state_size, action_size, memory_size, device)
@@ -276,6 +281,19 @@ def main(args=None, logger=None, id=None):
     steps = 0
     episodes = 0
     best_result = -float('inf')
+
+    obs    = dataset["observations"]
+    acts   = dataset["actions"]
+    rews   = dataset["rewards"]
+    nobs   = dataset["next_observations"]
+    dones  = dataset["terminals"]
+
+    for s, a, r, s2, d in zip(obs, acts, rews, nobs, dones):
+        mask = 0.0 if d else cfg.args.gamma
+        agent.append_memory(s, a, r, s2, mask)
+
+    for _ in range(pretraining_steps):
+        agent.train(log_callback=lambda metrics, step: wandb.log(metrics))
 
     while steps < num_steps:
         episode_reward = 0.
