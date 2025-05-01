@@ -87,6 +87,7 @@ class Diffusion(nn.Module):
                              (1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod))
 
         self.loss_fn = Losses[loss_type]()
+        self.eta = 0.5  # eta for DDIM sampling
 
 
     def set_timesteps(self, device=None):
@@ -183,6 +184,51 @@ class Diffusion(nn.Module):
             dir_xt = ((a_prev.sqrt() * x0 - a_t.sqrt() * x) / (a_t.sqrt()))
             x = a_prev.sqrt() * x0 + dir_xt
         return x.clamp(-1., 1.)
+    
+    @torch.no_grad()
+    def ddim_sample_stochastic(self, state):
+        """Stochastic DDIM sampling with eta and noise_ratio controlling noise strength."""
+        device = self.betas.device
+        batch = state.shape[0]
+        x = torch.randn((batch, self.action_dim), device=device)
+        self.set_timesteps(device=device)
+
+        for idx, t in enumerate(self.timesteps):
+            ts = torch.full((batch,), t, device=device, dtype=torch.long)
+            eps = self.model(x, ts, state)
+            x0 = self.predict_start_from_noise(x, ts, eps)
+
+            # 1) Optional clamp of the denoised estimate
+            if self.clip_denoised:
+                x0 = x0.clamp(-1., 1.)
+
+            a_t = extract(self.alphas_cumprod, ts, x.shape)
+            next_t = self.timesteps[idx+1] if idx+1 < len(self.timesteps) else 0
+            a_prev = extract(
+                self.alphas_cumprod,
+                torch.full((batch,), next_t, device=device, dtype=torch.long),
+                x.shape
+            )
+
+            # 2) Deterministic DDIM drift direction
+            dir_xt = (a_prev.sqrt() * x0 - a_t.sqrt() * x) / a_t.sqrt()
+
+            # 3) Compute stochastic scale σ_t, now including noise_ratio
+            sigma_t = (
+                self.eta
+                * self.noise_ratio
+                * ((1 - a_prev) / (1 - a_t)).sqrt()
+                * (1 - a_t / a_prev).sqrt()
+            )
+
+            # 4) Inject noise but mask it out when t == 0
+            noise = torch.randn_like(x)
+            nonzero_mask = (t != 0).float().view(batch, *([1] * (x.dim() - 1)))
+            x = a_prev.sqrt() * x0 + dir_xt + nonzero_mask * (sigma_t * noise)
+
+        return x.clamp(-1., 1.)
+
+
 
     def plms_sample(self, state):
         """(Placeholder) PLMS sampling to be implemented."""

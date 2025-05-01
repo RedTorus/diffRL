@@ -227,7 +227,7 @@ def main(args=None, logger=None, id=None):
         wandb.define_metric("steps",       step_metric="episode")
     # Initial environment
     env = gym.make(args.env_name)
-    env = gym.wrappers.TimeLimit(env.env, max_episode_steps=300)
+    env = gym.wrappers.TimeLimit(env, max_episode_steps=300)
     dataset = d4rl.qlearning_dataset(env) #env.get_dataset()
 
     eval_env = copy.deepcopy((env))
