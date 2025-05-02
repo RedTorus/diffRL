@@ -24,7 +24,7 @@ class Diffusion(nn.Module):
 
         self.state_dim = state_dim
         self.action_dim = action_dim
-        self.model = Model(state_dim, action_dim, hidden_size=512)
+        self.model = Model(state_dim, action_dim, hidden_size=256)
         self.mode = mode #### for different agents
         self.max_noise_ratio = noise_ratio
         self.noise_ratio = noise_ratio

@@ -65,7 +65,7 @@ class ActorCriticBase:
 
         # --- Critic setup ---
         
-        self.critic        = Critic(self.state_dim, action_dim, hidden_dim=512).to(self.device)
+        self.critic        = Critic(self.state_dim, action_dim, hidden_dim=256).to(self.device)
         self.critic_target = copy.deepcopy(self.critic)
 
         # --- Optimizers ---
