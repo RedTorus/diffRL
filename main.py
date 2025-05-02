@@ -227,9 +227,12 @@ def main(args=None, logger=None, id=None):
         wandb.define_metric("steps",       step_metric="episode")
     # Initial environment
     env = gym.make(args.env_name)
-    env = gym.wrappers.TimeLimit(env, max_episode_steps=300)
-    dataset = d4rl.qlearning_dataset(env) #env.get_dataset()
-
+    #env = gym.wrappers.TimeLimit(env, max_episode_steps=300)
+    if args.env_name in ['pen-human-v0', 'pen-cloned-v0', 'pen-expert-v0', 'relocate-human-v0', 'relocate-cloned-v0', 'relocate-expert-v0', 'hammer-human-v0', 'hammer-cloned-v0', 'hammer-expert-v0']:
+        env = gym.wrappers.TimeLimit(env, max_episode_steps=300)
+        dataset = d4rl.qlearning_dataset(env) #env.get_dataset()
+    else:
+        dataset=None
     eval_env = copy.deepcopy((env))
     state_size = int(np.prod(env.observation_space.shape))
     action_size = int(np.prod(env.action_space.shape))
@@ -282,18 +285,21 @@ def main(args=None, logger=None, id=None):
     episodes = 0
     best_result = -float('inf')
 
-    obs    = dataset["observations"]
-    acts   = dataset["actions"]
-    rews   = dataset["rewards"]
-    nobs   = dataset["next_observations"]
-    dones  = dataset["terminals"]
+    if dataset is not None:
+        obs    = dataset["observations"]
+        acts   = dataset["actions"]
+        rews   = dataset["rewards"]
+        nobs   = dataset["next_observations"]
+        dones  = dataset["terminals"]
 
-    for s, a, r, s2, d in zip(obs, acts, rews, nobs, dones):
-        mask = 0.0 if d else cfg.args.gamma
-        agent.append_memory(s, a, r, s2, mask)
 
-    for _ in range(pretraining_steps):
-        agent.train(log_callback=lambda metrics, step: wandb.log(metrics))
+        for s, a, r, s2, d in zip(obs, acts, rews, nobs, dones):
+            mask = 0.0 if d else cfg.args.gamma
+            agent.append_memory(s, a, r, s2, mask)
+
+        for _ in range(pretraining_steps):
+            agent.train(log_callback=lambda metrics, step: wandb.log(metrics))
+    
 
     while steps < num_steps:
         episode_reward = 0.

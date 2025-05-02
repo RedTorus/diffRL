@@ -19,7 +19,7 @@ class Diffusion(nn.Module):
                  beta_schedule='vp', n_timesteps=1000,
                  loss_type='l2', clip_denoised=True, predict_epsilon=True,
                  behavior_sample=16, eval_sample=512, deterministic=False, mode='qvpo', 
-                 diffusion_mode='ddpm', num_inference_steps=0):
+                 diffusion_mode='ddpm', num_inference_steps=0, order_k=4):
         super(Diffusion, self).__init__()
 
         self.state_dim = state_dim
@@ -39,11 +39,19 @@ class Diffusion(nn.Module):
             if diffusion_mode == 'ddpm':
                 self.num_inference_steps = n_timesteps
             elif diffusion_mode == 'ddim':
-                self.num_inference_steps = 50
-            elif diffusion_mode == 'plms':
-                self.num_inference_steps = 50
+                self.num_inference_steps = n_timesteps
+            elif diffusion_mode == 'ddim_stochastic':
+                self.num_inference_steps = n_timesteps
+            elif diffusion_mode == 'lms':
+                self.num_inference_steps = n_timesteps
+            elif diffusion_mode == 'rk':
+                self.num_inference_steps = n_timesteps
             elif diffusion_mode == 'dpmsolver':
-                self.num_inference_steps = 50
+                self.num_inference_steps = n_timesteps
+            elif diffusion_mode == 'heun':
+                self.num_inference_steps = n_timesteps
+            elif diffusion_mode == 'pc':
+                self.num_inference_steps = n_timesteps
             else:
                 raise ValueError(f"Unknown diffusion_mode={self.diffusion_mode}")
 
@@ -82,12 +90,29 @@ class Diffusion(nn.Module):
         self.register_buffer('posterior_log_variance_clipped',
                              torch.log(torch.clamp(posterior_variance, min=1e-20)))
         self.register_buffer('posterior_mean_coef1',
-                             betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod))
+                             betas * torch.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod))
         self.register_buffer('posterior_mean_coef2',
-                             (1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod))
+                             (1. - alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - alphas_cumprod))
 
         self.loss_fn = Losses[loss_type]()
         self.eta = 0.5  # eta for DDIM sampling
+        self.order_k = order_k
+        self.lms_k = min(self.order_k, 8)  # max order of Adams-Bashforth
+        self.rk_k = min(self.order_k, 4)  # max order of Runge-Kutta
+        self.dpm_solver_order = min(self.order_k, 3)  # max order of DPM-Solver
+        self.adams_bashforth_coeffs = {
+            1: [1.0],
+            2: [3/2, -1/2],
+            3: [23/12, -16/12, 5/12],
+            4: [55/24, -59/24, 37/24, -9/24],          # ← PNDM
+            5: [1901/720, -2774/720, 2616/720, -1274/720, 251/720],
+            6: [4277/1440, -7923/1440, 9982/1440, -7298/1440, 2877/1440, -475/1440],
+            7: [198721/60480, -447288/60480, 705549/60480,
+                -688256/60480, 407139/60480, -134472/60480, 19087/60480],
+            8: [434241/120960, -1152169/120960, 2183877/120960,
+                -2664477/120960, 2102243/120960, -1041723/120960,
+                295767/120960, -36799/120960],
+        }
 
 
     def set_timesteps(self, device=None):
@@ -109,8 +134,20 @@ class Diffusion(nn.Module):
         '''
             if self.predict_epsilon, model output is (scaled) noise;
             otherwise, model predicts x0 directly
+
+            Given a noisy sample x_t at timestep t and either:
+            - `noise = εθ(x_t, t)` if predict_epsilon=True, or
+            - `noise = x̂₀` if predict_epsilon=False,
+            recover the model’s estimate of x₀:
+            
+            If predicting ε:
+                x̂₀ = (x_t / sqrt(ᾱ_t)) - (√(1−ᾱ_t)/√ᾱ_t) · ε
+            
+            else:
+                the model already outputs x̂₀ directly.
         '''
         if self.predict_epsilon:
+            #compute the estimate  x0 ​of the original clean sample
             return (
                     extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
                     extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
@@ -140,6 +177,7 @@ class Diffusion(nn.Module):
 
     @torch.no_grad()
     def p_sample(self, x, t, s):
+        #Performs one ancestral reverse step of DDPM
         b, *_, device = *x.shape, x.device
 
         model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, s=s)
@@ -155,6 +193,7 @@ class Diffusion(nn.Module):
     def p_sample_loop(self, state, shape):
         """
         DDPM ancestral sampling over self.timesteps for uniform inference steps.
+        ancestral DDPM sampling for all selected timesteps, starting from pure Gaussian noise at t=T and iterating downward to t=0
         """
         device = self.betas.device
         batch_size = shape[0]
@@ -167,86 +206,383 @@ class Diffusion(nn.Module):
         return x
 
     # -------------------- New Samplers --------------------
-    @torch.no_grad()
-    def ddim_sample(self, state):
-        """Deterministic DDIM sampling."""
-        device = self.betas.device
-        batch = state.shape[0]
-        x = torch.randn((batch, self.action_dim), device=device)
-        self.set_timesteps(device=device)
-        for idx, t in enumerate(self.timesteps):
-            ts = torch.full((batch,), t, device=device, dtype=torch.long)
-            eps = self.model(x, ts, state)
-            x0 = self.predict_start_from_noise(x, ts, eps)
-            a_t = extract(self.alphas_cumprod, ts, x.shape)
-            next_t = self.timesteps[idx+1] if idx+1 < len(self.timesteps) else 0
-            a_prev = extract(self.alphas_cumprod, torch.full((batch,), next_t, device=device, dtype=torch.long), x.shape)
-            dir_xt = ((a_prev.sqrt() * x0 - a_t.sqrt() * x) / (a_t.sqrt()))
-            x = a_prev.sqrt() * x0 + dir_xt
-        return x.clamp(-1., 1.)
     
     @torch.no_grad()
-    def ddim_sample_stochastic(self, state):
-        """Stochastic DDIM sampling with eta and noise_ratio controlling noise strength."""
-        device = self.betas.device
-        batch = state.shape[0]
-        x = torch.randn((batch, self.action_dim), device=device)
-        self.set_timesteps(device=device)
+    def _ddim_step(self, x, t, next_t, state, stochastic: bool):
+        """
+        One reverse‐DDIM step, optionally with stochastic noise.
+        
+        Args:
+        x        : current x_t, shape (B, action_dim)
+        t        : tensor of shape (B,) holding the current timestep
+        next_t   : tensor of shape (B,) holding the next timestep (or 0)
+        state    : conditioning state passed to your model
+        stochastic: if True, inject noise scaled by eta*noise_ratio
+        
+        Returns:
+        x_{t-1} estimate, shape (B, action_dim)
+        """
+        # 1) predict εθ(x_t,t) or x₀ directly
+        eps_or_x0 = self.model(x, t, state)
+        x0 = self.predict_start_from_noise(x, t, eps_or_x0)
 
-        for idx, t in enumerate(self.timesteps):
-            ts = torch.full((batch,), t, device=device, dtype=torch.long)
-            eps = self.model(x, ts, state)
-            x0 = self.predict_start_from_noise(x, ts, eps)
+        # 2) optional clamp of x0
+        if self.clip_denoised:
+            x0 = x0.clamp(-1., 1.)
 
-            # 1) Optional clamp of the denoised estimate
-            if self.clip_denoised:
-                x0 = x0.clamp(-1., 1.)
+        # 3) fetch ᾱ_t and ᾱ_{t-1}
+        a_t     = extract(self.alphas_cumprod,     t,      x.shape)
+        a_prev  = extract(self.alphas_cumprod, next_t,   x.shape)
+        sqrt_a_t    = a_t.sqrt()
+        sqrt_a_prev = a_prev.sqrt()
 
-            a_t = extract(self.alphas_cumprod, ts, x.shape)
-            next_t = self.timesteps[idx+1] if idx+1 < len(self.timesteps) else 0
-            a_prev = extract(
-                self.alphas_cumprod,
-                torch.full((batch,), next_t, device=device, dtype=torch.long),
-                x.shape
-            )
+        # 4) deterministic DDIM drift
+        dir_xt = (sqrt_a_prev * x0 - sqrt_a_t * x) / sqrt_a_t
+        x_prev = sqrt_a_prev * x0 + dir_xt
 
-            # 2) Deterministic DDIM drift direction
-            dir_xt = (a_prev.sqrt() * x0 - a_t.sqrt() * x) / a_t.sqrt()
-
-            # 3) Compute stochastic scale σ_t, now including noise_ratio
+        # 5) optional stochastic
+        if stochastic:
+            # compute σ_t = η·noise_ratio·√((1−ᾱ_{t-1})/(1−ᾱ_t))·√(1−ᾱ_t/ᾱ_{t-1})
             sigma_t = (
                 self.eta
                 * self.noise_ratio
                 * ((1 - a_prev) / (1 - a_t)).sqrt()
                 * (1 - a_t / a_prev).sqrt()
             )
-
-            # 4) Inject noise but mask it out when t == 0
             noise = torch.randn_like(x)
-            nonzero_mask = (t != 0).float().view(batch, *([1] * (x.dim() - 1)))
-            x = a_prev.sqrt() * x0 + dir_xt + nonzero_mask * (sigma_t * noise)
+            mask  = (t != 0).float().view(-1, *([1] * (x.ndim - 1)))
+            x_prev = x_prev + mask * sigma_t * noise
+
+        return x_prev
+
+    @torch.no_grad()
+    def _dpm_solver_step(self, x, ts, nts, state):
+        """
+        One step of DPM-Solver-2 or -3:
+        - ts  = current timestep tensor
+        - nts = next   timestep tensor
+        - x   = x_t
+        - state = conditioning
+        Returns x_{t-1}.
+        """
+        # 1) Compute alpha_i, alpha_j and h = ln(alpha_j/alpha_i)
+        alpha_i = extract(self.alphas_cumprod, ts,  x.shape)
+        alpha_j = extract(self.alphas_cumprod, nts, x.shape)
+        h       = alpha_j.log() - alpha_i.log()
+
+        # 2) Predictor at i: ε_i and x0_i
+        eps_i = self.model(x, ts, state)
+        x0_i  = self.predict_start_from_noise(x, ts, eps_i)
+
+        # 3) Exponential–Euler predictor to j
+        sqrt_alpha_j            = alpha_j.sqrt()
+        sqrt_one_minus_alpha_j  = extract(self.sqrt_one_minus_alphas_cumprod, nts, x.shape)
+        x_j_e                   = sqrt_alpha_j * x0_i + sqrt_one_minus_alpha_j * eps_i
+
+        # 4) Corrector eval at j: ε_j and x0_j
+        eps_j = self.model(x_j_e, nts, state)
+        x0_j  = self.predict_start_from_noise(x_j_e, nts, eps_j)
+
+        # 5) 2nd-order update
+        eta = (h.exp() - 1) / h
+        if self.dpm_solver_order == 2:
+            return sqrt_alpha_j * (eta * x0_i + (1 - eta) * x0_j)
+
+        # 6) 3rd-order midpoint
+        alpha_mid = (alpha_i.log() + 0.5 * h).exp()
+        sqrt_alpha_mid           = alpha_mid.sqrt()
+        sqrt_one_minus_alpha_mid = (1 - alpha_mid).sqrt().unsqueeze(-1)
+        x_mid_e                  = sqrt_alpha_mid * x0_i + sqrt_one_minus_alpha_mid * eps_i
+
+        eps_mid = self.model(x_mid_e, ts, state)
+        x0_mid  = self.predict_start_from_noise(x_mid_e, ts, eps_mid)
+
+        # 7) 3rd-order weights
+        b0 = ((h.exp() - 1)*(h - 2) + 2*(h.exp() - 1)) / (2 * h * h)
+        b1 = (2*h - 4 + 2*h.exp()*(2 - h)) / (2 * h * h)
+
+        # 8) Combine for order-3
+        return sqrt_alpha_j * (b0 * x0_i + b1 * x0_mid + b0 * x0_j)
+
+    @torch.no_grad()
+    def ddim_sample(self, state):
+        """Purely deterministic DDIM (η=0)."""
+        device = self.betas.device
+        B = state.shape[0]
+        x = torch.randn((B, self.action_dim), device=device)
+        self.set_timesteps(device=device)
+
+        for idx, t in enumerate(self.timesteps):
+            ts     = torch.full((B,), t,      device=device, dtype=torch.long)
+            next_t = (self.timesteps[idx+1]
+                    if idx+1 < len(self.timesteps) else 0)
+            nts    = torch.full((B,), next_t, device=device, dtype=torch.long)
+
+            x = self._ddim_step(x, ts, nts, state, stochastic=False)
 
         return x.clamp(-1., 1.)
 
 
+    @torch.no_grad()
+    def ddim_sample_stochastic(self, state):
+        """DDIM with per-step noise (η>0)."""
+        device = self.betas.device
+        B = state.shape[0]
+        x = torch.randn((B, self.action_dim), device=device)
+        self.set_timesteps(device=device)
 
-    def plms_sample(self, state):
-        """(Placeholder) PLMS sampling to be implemented."""
-        raise NotImplementedError("PLMS sampler not implemented yet")
+        for idx, t in enumerate(self.timesteps):
+            ts     = torch.full((B,), t,      device=device, dtype=torch.long)
+            next_t = (self.timesteps[idx+1]
+                    if idx+1 < len(self.timesteps) else 0)
+            nts    = torch.full((B,), next_t, device=device, dtype=torch.long)
 
+            x = self._ddim_step(x, ts, nts, state, stochastic=True)
+
+        return x.clamp(-1., 1.)
+
+    @torch.no_grad()
+    def lms_sample(self, state):
+        """
+        General k-step Linear Multistep (Adams–Bashforth) sampler,
+        order = self.lms_k (max 8).  PNDM is simply k=4.
+        """
+        device = self.betas.device
+        B = state.shape[0]
+        x = torch.randn((B, self.action_dim), device=device)
+        self.set_timesteps(device=device)
+
+        old_derivs = []
+        for idx, t in enumerate(self.timesteps):
+            # pack current & next timestep
+            ts     = torch.full((B,), t,      device=device, dtype=torch.long)
+            next_t = (self.timesteps[idx+1]
+                      if idx+1 < len(self.timesteps) else 0)
+            nts    = torch.full((B,), next_t, device=device, dtype=torch.long)
+
+            # predict x0 and compute derivative f_i = (x - x0)/σ_t
+            eps   = self.model(x, ts, state)
+            x0    = self.predict_start_from_noise(x, ts, eps)
+            sigma = extract(self.sqrt_recipm1_alphas_cumprod, ts, x.shape)
+            f_i   = (x - x0) / sigma
+
+            # update derivative buffer
+            old_derivs.append(f_i)
+            if len(old_derivs) > self.lms_k:
+                old_derivs.pop(0)
+
+            # step size h = σ_{i+1} - σ_i
+            sigma_next = extract(self.sqrt_recipm1_alphas_cumprod, nts, x.shape)
+            h = sigma_next - sigma
+
+            # determine how many past steps we actually have
+            order = min(len(old_derivs), self.lms_k)
+            coeffs = self.adams_bashforth_coeffs[order]
+
+            # form the weighted sum of the last `order` derivatives
+            deriv_terms = [
+                coeffs[j] * old_derivs[-1 - j]
+                for j in range(order)
+            ]
+            deriv_combined = sum(deriv_terms)
+
+            # advance along the deterministic ODE
+            x = x + h * deriv_combined
+
+        return x.clamp(-1., 1.)
+
+    @torch.no_grad()
+    def rk_sample(self, state):
+        """
+        k-stage explicit Runge–Kutta sampler over the σ-ODE.
+        Uses k stages per step (self.rk_k in {2,3,4}).
+        """
+        device = self.betas.device
+        B = state.shape[0]
+        x = torch.randn((B, self.action_dim), device=device)
+        self.set_timesteps(device=device)
+
+        # Butcher tableaus for supported k
+        rk_params = {
+            2: {  # Midpoint (RK2)
+                "c":[0, 0.5],
+                "a":[[], [0.5]],
+                "b":[0, 1]  # note: normalized to sum=1
+            },
+            3: {  # Heun’s method (RK3)
+                "c":[0, 0.5, 1],
+                "a":[[],
+                     [0.5],
+                     [-1, 2]],
+                "b":[1/6, 2/3, 1/6]
+            },
+            4: {  # Classical RK4
+                "c":[0, 0.5, 0.5, 1],
+                "a":[[],
+                     [0.5],
+                     [0, 0.5],
+                     [0, 0, 1]],
+                "b":[1/6, 1/3, 1/3, 1/6]
+            },
+        }[self.rk_k]
+
+        for idx, t in enumerate(self.timesteps):
+            ts     = torch.full((B,), t,      device=device, dtype=torch.long)
+            next_t = (self.timesteps[idx+1]
+                      if idx+1 < len(self.timesteps) else 0)
+            nts    = torch.full((B,), next_t, device=device, dtype=torch.long)
+
+            # get σ_i, σ_{i+1}
+            sigma_i     = extract(self.sqrt_recipm1_alphas_cumprod, ts,  x.shape)
+            sigma_next  = extract(self.sqrt_recipm1_alphas_cumprod, nts, x.shape)
+            h = sigma_next - sigma_i
+
+            # pre-allocate stages
+            ks = []
+
+            for stage in range(self.rk_k):
+                c = rk_params["c"][stage]
+                # build σ_stage = σ_i + c*h
+                sigma_stage = sigma_i + c * h
+
+                # build x_stage = x + h * sum_j (a[stage][j] * ks[j])
+                if stage == 0:
+                    x_stage = x
+                else:
+                    acc = torch.zeros_like(x)
+                    for j, a_ij in enumerate(rk_params["a"][stage]):
+                        acc = acc + a_ij * ks[j]
+                    x_stage = x + h * acc
+
+                # compute f = (x_stage - x0_stage) / σ_stage
+                # need corresponding t_stage: pick nearest
+                # (simplest: use ts for all stages, since \hat x0 only weakly dependent on t)
+                eps = self.model(x_stage, ts, state)
+                x0  = self.predict_start_from_noise(x_stage, ts, eps)
+                f   = (x_stage - x0) / sigma_stage
+                ks.append(f)
+
+            # combine stages: x_{i+1} = x + h*sum(b_j * k_j)
+            update = sum(b * k for b, k in zip(rk_params["b"], ks))
+            x = x + h * update
+
+        return x.clamp(-1., 1.)
+
+
+    @torch.no_grad()
     def dpm_solver_sample(self, state):
-        """(Placeholder) DPM-Solver sampling to be implemented."""
-        raise NotImplementedError("DPM-Solver sampler not implemented yet")
+        """
+        DPM-Solver (order 2 or 3) using a private per-step helper.
+        """
+        device = self.betas.device
+        B = state.shape[0]
+        x = torch.randn((B, self.action_dim), device=device)
+        self.set_timesteps(device=device)
+
+        for idx, t in enumerate(self.timesteps):
+            ts     = torch.full((B,), t,      device=device, dtype=torch.long)
+            next_t = (self.timesteps[idx+1] if idx+1 < len(self.timesteps) else 0)
+            nts    = torch.full((B,), next_t, device=device, dtype=torch.long)
+            x = self._dpm_solver_step(x, ts, nts, state)
+
+        return x.clamp(-1., 1.)
+
+    @torch.no_grad()
+    def heun_sde_sample(self, state):
+        """
+        Heun’s two‐stage SDE integrator (strong order 1):
+            1) Predictor: Euler–Maruyama
+            2) Corrector: trapezoidal update
+        """
+        device = self.betas.device
+        B = state.shape[0]
+        x = torch.randn((B, self.action_dim), device=device)
+        self.set_timesteps(device=device)
+
+        for idx, t in enumerate(self.timesteps):
+            # current & next timestep indices
+            ts     = torch.full((B,), t,      device=device, dtype=torch.long)
+            next_t = self.timesteps[idx+1] if idx+1 < len(self.timesteps) else 0
+            nts    = torch.full((B,), next_t, device=device, dtype=torch.long)
+
+            # — Predictor (Euler–Maruyama) —
+            # compute model mean and log‐variance at (x_t, t)
+            model_mean_t, _, model_log_var_t = self.p_mean_variance(x=x, t=ts, s=state)
+            # noise standard deviation scaled by noise_ratio
+            std_t = (0.5 * model_log_var_t).exp() * self.noise_ratio
+            # draw one noise sample for both stages
+            z = torch.randn_like(x)
+
+            # build noise‐mask so we don't re‐noise at t==0
+            nonzero = (t != 0).float().view(B, *([1] * (x.ndim - 1)))
+
+            # Euler step
+            x_e = model_mean_t + nonzero*std_t * z
+
+            # — Corrector (Heun) —
+            # recompute mean at the Euler‐predicted point (x_e, t−Δt)
+            model_mean_e, _, _ = self.p_mean_variance(x=x_e, t=nts, s=state)
+            # trapezoidal update + same noise term
+            x = x + 0.5 * ((model_mean_t + model_mean_e) - x) + std_t * z
+
+        return x.clamp(-1., 1.)
+
+    @torch.no_grad()
+    def pc_sampler(self, state, snr=0.16, n_corrector=1):
+        """
+        Predictor–Corrector sampler:
+          - n_corrector Langevin (score‐based) steps per diffusion step
+          - 1 ancestral SDE step
+        """
+        device = self.betas.device
+        B = state.shape[0]
+        x = torch.randn((B, self.action_dim), device=device)
+        self.set_timesteps(device=device)
+
+        for t in self.timesteps:
+            ts = torch.full((B,), t, device=device, dtype=torch.long)
+
+            # Precompute σ_t = sqrt((1−ᾱ_t)/ᾱ_t)
+            alpha_bar = extract(self.alphas_cumprod, ts, x.shape)
+            sigma_t   = (1 - alpha_bar).sqrt() / alpha_bar.sqrt()
+
+            # — Corrector: n_corrector steps of Langevin MCMC —
+            for _ in range(n_corrector):
+                eps = self.model(x, ts, state)                 # εθ(x,t)
+                score = -eps / sigma_t.unsqueeze(-1)           # ∇ log p ≈ −ε/σ
+                # compute step‐size via SNR heuristic
+                grad_norm  = score.flatten(1).norm(dim=-1).mean()
+                noise_norm = torch.randn_like(x).flatten(1).norm(dim=-1).mean()
+                step_size  = (snr * noise_norm / grad_norm) ** 2 * 2
+                z = torch.randn_like(x)
+                x = x + step_size * score + (2 * step_size) ** 0.5 * z
+
+            # — Predictor: standard DDPM ancestral step —
+            model_mean, _, model_log_var = self.p_mean_variance(x=x, t=ts, s=state)
+            noise = torch.randn_like(x)
+            # build noise‐mask so we don't re‐noise at t==0
+            nonzero = (t != 0).float().view(B, *([1] * (x.ndim - 1)))
+            x = model_mean + nonzero*(noise * (0.5 * model_log_var).exp() * self.noise_ratio)
+
+        return x.clamp(-1., 1.)
 
     def _call_sampler(self, s, shape):
         if self.diffusion_mode == 'ddpm':
             return self.p_sample_loop(s, shape)
         elif self.diffusion_mode == 'ddim':
             return self.ddim_sample(s)
-        elif self.diffusion_mode == 'plms':
-            return self.plms_sample(s)
+        elif self.diffusion_mode == 'ddim_stochastic':
+            return self.ddim_sample_stochastic(s)
+        elif self.diffusion_mode == 'lms':
+            return self.lms_sample(s)
+        elif self.diffusion_mode == 'rk':
+            return self.rk_sample(s)
         elif self.diffusion_mode == 'dpmsolver':
             return self.dpm_solver_sample(s)
+        elif self.diffusion_mode == 'heun':
+            return self.heun_sde_sample(s)
+        elif self.diffusion_mode == 'pc':
+            return self.pc_sampler(s)
         else:
             raise ValueError(f"Unknown diffusion_mode={self.diffusion_mode}")
 
