@@ -8,16 +8,19 @@ conda activate qvpo
 ```
 To get started, install the additionally required python packages into you environment.
 ```
-pip install -r requirements.txt
+pip install -r requirements2.txt
 ```
 
 ## Running
-Running experiments based our code could be quite easy, so below we use `HalfCheetah-v3` task as an example. 
+`HalfCheetah-v3` task as an example. 
 
 ```
 python main.py --env_name HalfCheetah-v3--weighted --aug
 ```
-
+or more complex
+```
+python main.py --env_name relocate-human-v0 --agent dipo --n_timesteps 40 --batch_size 128 --pretraining_steps 10000
+```
 
 
 ## Acknowledgement
