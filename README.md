@@ -3,8 +3,8 @@
 Installations of [PyTorch](https://pytorch.org/) and [MuJoCo](https://github.com/deepmind/mujoco) are needed. 
 A suitable [conda](https://conda.io) environment named `qvpo` can be created and activated with:
 ```
-conda create qvpo
-conda activate qvpo
+conda create diffRL
+conda activate diffRL
 ```
 To get started, install the additionally required python packages into you environment.
 ```
